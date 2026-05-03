@@ -487,26 +487,65 @@ def _action_mask(gs: dict) -> list:
     """
     Returns a 9-element validity mask for the expanded action space.
 
-    Fix: fold is INVALID when can_check=True.  In real poker you cannot fold
-    when checking is free — masking it out prevents the learned policy from
-    surrendering hands it could see for free.
+    Hard constraints applied (in addition to legality):
+
+    1. Fold-when-can-check guard (existing):
+       Fold is invalid when can_check=True — you cannot fold a free check.
+
+    2. Pot-odds call guard (new):
+       Fold is also invalid when facing a bet with clearly positive call EV
+       (hand_strength - pot_odds > 0.12).  Forces the model to call or raise
+       rather than throw away a mathematically profitable spot.
+
+    3. Deep-stacked flop all-in guard (new):
+       All-in is invalid on the flop when SPR > 6.  Deep-stacked flop shoves
+       scare opponents into folding, leaving value on the table.  Forces the
+       model to use a sized bet instead and keep opponents in the pot.
+
+    4. Garbage river overbet guard (new):
+       Raise 150 % and 200 % are invalid on the river when hand_strength < 0.25
+       and can_check=True.  Prevents constant pot-sized bluffs with complete
+       air — small bluffs (raise25–100 %) are still permitted.
     """
     owed      = gs.get("amount_owed",  0)
     stack     = gs.get("your_stack",   0)
     min_raise = gs.get("min_raise_to", 0)
+    pot       = max(1, gs.get("pot",   1))
     can_check = gs.get("can_check",    False)
+    street    = gs.get("street",       "")
+    hs        = gs.get("hand_strength", 0.5)   # injected by train.py / bot.py
     can_raise = stack > owed and min_raise <= stack
+    spr       = stack / pot
+
+    # ── Pot odds: compute call_ev from gs fields ──────────────────────────────
+    po       = owed / max(1, owed + pot) if owed > 0 else 0.0
+    call_ev  = hs - po
+
+    # ── Fix 1 + 2: fold validity ──────────────────────────────────────────────
+    fold_ok  = not can_check                   # never fold a free check
+    if owed > 0 and call_ev > 0.12:
+        fold_ok = False                        # never fold a clearly +EV call
+
+    # ── Fix 3: all-in validity on deep-stacked flop ───────────────────────────
+    allin_ok = stack > 0
+    if street == "flop" and spr > 6:
+        allin_ok = False                       # size down, keep opponents in
+
+    # ── Fix 4: block large overbets with weak hands on river ─────────────────
+    overbet_ok = can_raise
+    if street == "river" and hs < 0.25 and can_check:
+        overbet_ok = False                     # no 150/200 % bluffs with air
 
     return [
-        not can_check,  # fold: invalid when a free check is available
+        fold_ok,        # fold
         True,           # check/call
         can_raise,      # raise ~25 % pot
         can_raise,      # raise ~50 % pot
         can_raise,      # raise ~75 % pot
         can_raise,      # raise ~100 % pot
-        can_raise,      # raise ~150 % pot (overbet)
-        can_raise,      # raise ~200 % pot (big overbet)
-        stack > 0,      # all-in
+        overbet_ok,     # raise ~150 % pot (overbet)
+        overbet_ok,     # raise ~200 % pot (big overbet)
+        allin_ok,       # all-in
     ]
 
 

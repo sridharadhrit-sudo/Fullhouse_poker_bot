@@ -88,6 +88,8 @@ def decide(game_state: dict) -> dict:
     #    Threshold raised to 2,000 episodes so early-training aggression
     #    bias doesn't bleed into live play.
     if _rl_active and _rl.episodes_trained >= 2000:
+        game_state["hand_strength"] = ctx.get("hand_strength", 0.5)
+        game_state["spr"]           = ctx.get("spr", 10)
         rl_action = _rl.select_action_greedy(ctx, game_state)
         if rl_action is not None:
             return _validate(rl_action, game_state)

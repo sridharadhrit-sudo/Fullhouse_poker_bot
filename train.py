@@ -153,6 +153,9 @@ def _betting_round(street, pot, stacks, community, dealer,
                 action = rule_decide(gs)
             else:
                 ctx    = _pre.process(gs)
+                # Inject preprocessed fields so _action_mask can use them
+                gs["hand_strength"] = ctx.get("hand_strength", 0.5)
+                gs["spr"]           = ctx.get("spr", 10)
                 action = rl_policy.select_action(ctx, gs)
                 if action is None:
                     action = {"action": "fold"}
