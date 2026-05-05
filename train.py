@@ -98,14 +98,104 @@ def _make_gs(seat, hands, community, street, pot, stacks, owed,
     }
 
 
+# ── Opponent archetypes ───────────────────────────────────────────────────────
+
+OPPONENT_STYLES = ("rule", "aggressive", "loose", "tight", "passive", "random", "mixed")
+
+def _opponent_action(gs: dict, style: str) -> dict:
+    """
+    Heuristic opponent decision by playing style.
+
+    aggressive  — LAG: bets/raises frequently, bluffs, 3-bets wide
+    loose       — Calling station: calls nearly everything, rarely raises
+    tight       — Nit: folds most hands, only continues with strong holdings
+    passive     — Never raises; checks and calls only
+    random      — Uniformly random legal action
+    rule        — Default rule-based bot (GTO-ish TAG baseline)
+    """
+    owed      = gs.get("amount_owed",  0)
+    can_check = gs.get("can_check",    False)
+    stack     = gs.get("your_stack",   0)
+    pot       = max(1, gs.get("pot",   1))
+    min_raise = gs.get("min_raise_to", max(owed * 2, 1))
+    can_raise = stack > owed and min_raise <= stack
+
+    r = random.random()
+
+    if style == "aggressive":
+        if can_check:
+            if r < 0.65 and can_raise:
+                amt = max(min_raise, min(int(pot * random.uniform(0.75, 1.5)), stack))
+                return {"action": "raise", "amount": amt}
+            return {"action": "check"}
+        else:
+            if r < 0.35 and can_raise:
+                amt = max(min_raise, min(int(owed * random.uniform(2.5, 3.5)), stack))
+                return {"action": "raise", "amount": amt}
+            elif r < 0.80:
+                return {"action": "call"}
+            return {"action": "fold"}
+
+    elif style == "loose":
+        if can_check:
+            if r < 0.20 and can_raise:
+                amt = max(min_raise, min(int(pot * random.uniform(0.4, 0.8)), stack))
+                return {"action": "raise", "amount": amt}
+            return {"action": "check"}
+        else:
+            if r < 0.05 and can_raise:
+                amt = max(min_raise, min(int(owed * 2.5), stack))
+                return {"action": "raise", "amount": amt}
+            elif r < 0.85:
+                return {"action": "call"}
+            return {"action": "fold"}
+
+    elif style == "tight":
+        if can_check:
+            if r < 0.15 and can_raise:
+                amt = max(min_raise, min(int(pot * random.uniform(0.5, 0.75)), stack))
+                return {"action": "raise", "amount": amt}
+            return {"action": "check"}
+        else:
+            if r < 0.05 and can_raise:
+                amt = max(min_raise, min(int(owed * 3.0), stack))
+                return {"action": "raise", "amount": amt}
+            elif r < 0.35:
+                return {"action": "call"}
+            return {"action": "fold"}
+
+    elif style == "passive":
+        if can_check:
+            return {"action": "check"}
+        if r < 0.75:
+            return {"action": "call"}
+        return {"action": "fold"}
+
+    elif style == "random":
+        options = []
+        if can_check:
+            options.append({"action": "check"})
+        else:
+            options += [{"action": "fold"}, {"action": "call"}]
+        if can_raise:
+            amt = random.randint(min_raise, min(min_raise * 3, stack))
+            options.append({"action": "raise", "amount": amt})
+        return random.choice(options)
+
+    else:  # "rule" or unknown → GTO rule-based bot
+        return rule_decide(gs)
+
+
 # ── Headless betting round ────────────────────────────────────────────────────
 
 def _betting_round(street, pot, stacks, community, dealer,
                    hands, action_log, current_bet, street_bets,
-                   rl_policy, self_play, bb, n_players, active):
+                   rl_policy, self_play, bb, n_players, active,
+                   seat_styles=None):
     """
     Run one betting round for up to n_players.
 
+    seat_styles: dict mapping seat → style string (None → all "rule").
     Returns (pot, stacks, action_log, active_set).
     active_set has 1 element if everyone else folded.
     """
@@ -164,7 +254,8 @@ def _betting_round(street, pot, stacks, community, dealer,
                 ctx    = _pre.process(gs)
                 action = rl_policy.select_action_greedy(ctx, gs) or {"action": "fold"}
             else:
-                action = rule_decide(gs)
+                style  = (seat_styles or {}).get(seat, "rule")
+                action = _opponent_action(gs, style)
 
         # ── Apply action ──────────────────────────────────────────────────────
         act = action.get("action", "fold")
@@ -210,11 +301,20 @@ def _betting_round(street, pot, stacks, community, dealer,
 
 # ── Single hand ───────────────────────────────────────────────────────────────
 
-def run_hand(stacks, dealer, rl_policy, self_play, sb_size, bb_size, n_players):
+def run_hand(stacks, dealer, rl_policy, self_play, sb_size, bb_size, n_players,
+             opp_style="rule"):
     """
     Simulate one complete hand with n_players.
+    opp_style: one of OPPONENT_STYLES. "mixed" picks a random style per seat.
     Returns (new_stacks, chip_delta_for_rl).
     """
+    # Assign a style to every non-RL seat
+    if opp_style == "mixed":
+        fixed_styles = [s for s in OPPONENT_STYLES if s not in ("mixed", "rule")]
+        seat_styles  = {s: random.choice(fixed_styles)
+                        for s in range(n_players) if s != RL_SEAT}
+    else:
+        seat_styles = {s: opp_style for s in range(n_players) if s != RL_SEAT}
     deck = eval7.Deck()
     deck.shuffle()
     all_cards = [str(c) for c in deck.cards]
@@ -275,6 +375,7 @@ def run_hand(stacks, dealer, rl_policy, self_play, sb_size, bb_size, n_players):
             bb           = bb_size,
             n_players    = n_players,
             active       = active,
+            seat_styles  = seat_styles,
         )
 
         if len(active) == 1:
@@ -308,7 +409,8 @@ def run_hand(stacks, dealer, rl_policy, self_play, sb_size, bb_size, n_players):
 
 # ── Evaluation (no gradient updates) ─────────────────────────────────────────
 
-def evaluate(rl_policy, n_hands, stack, sb, bb, self_play, n_players):
+def evaluate(rl_policy, n_hands, stack, sb, bb, self_play, n_players,
+             opp_style="rule"):
     """Run n_hands without training. Returns RL win rate and avg BB/hand."""
     stacks  = {s: stack for s in range(n_players)}
     dealer  = RL_SEAT
@@ -322,7 +424,8 @@ def evaluate(rl_policy, n_hands, stack, sb, bb, self_play, n_players):
         new_stacks, delta = run_hand(stacks, dealer, rl_policy,
                                      self_play=self_play,
                                      sb_size=sb, bb_size=bb,
-                                     n_players=n_players)
+                                     n_players=n_players,
+                                     opp_style=opp_style)
         stacks       = new_stacks
         dealer       = (dealer + 1) % n_players
         total_delta += delta
@@ -354,8 +457,9 @@ def train(args):
     if args.resume:
         policy.load()
 
+    opp_label = "Self-play" if args.self_play else f"vs {args.opponent.upper()} opponents"
     print(f"\n{'═'*60}")
-    print(f"  RL Training — {'Self-play' if args.self_play else 'vs Rule-based bot'}")
+    print(f"  RL Training — {opp_label}")
     print(f"  Players:   {n_players}  |  RL seat: {RL_SEAT}")
     print(f"  Episodes:  {args.episodes:,}")
     print(f"  Stack:     {stack}  |  Blinds: {sb}/{bb}")
@@ -384,7 +488,8 @@ def train(args):
         new_stacks, delta = run_hand(stacks, dealer, policy,
                                      self_play=args.self_play,
                                      sb_size=sb, bb_size=bb,
-                                     n_players=n_players)
+                                     n_players=n_players,
+                                     opp_style=args.opponent)
 
         reward = delta / bb
         policy.finish_episode(reward)
@@ -422,7 +527,7 @@ def train(args):
     eval_policy = RLPolicy(temperature=0.1)
     eval_policy.load()
     wr, bb_h = evaluate(eval_policy, args.eval_hands, stack, sb, bb,
-                        args.self_play, n_players)
+                        args.self_play, n_players, opp_style=args.opponent)
     print(f"\n  Eval result: {wr:.1f}% win rate  |  {bb_h:+.2f} BB/hand  "
           f"(vs {'self' if args.self_play else 'rule-based bot'})")
     print(f"  Model saved → rl_model.pt\n")
@@ -436,9 +541,10 @@ def eval_only(args):
         print("No trained model found (rl_model.pt).  Train first.")
         return
 
-    print(f"\n  Evaluating over {args.eval} hands ({args.players} players)...")
+    print(f"\n  Evaluating over {args.eval} hands ({args.players} players, opp={args.opponent})...")
     wr, bb_h = evaluate(policy, args.eval, args.stack,
-                        args.sb, args.bb, args.self_play, args.players)
+                        args.sb, args.bb, args.self_play, args.players,
+                        opp_style=args.opponent)
     print(f"  Win rate : {wr:.1f}%")
     print(f"  BB/hand  : {bb_h:+.2f}\n")
 
@@ -459,6 +565,9 @@ def main():
                         help="Small blind size (default 5)")
     parser.add_argument("--lr",         type=float, default=3e-4,
                         help="Learning rate (default 3e-4)")
+    parser.add_argument("--opponent",    type=str,   default="rule",
+                        choices=OPPONENT_STYLES,
+                        help="Opponent style: rule|aggressive|loose|tight|passive|random|mixed")
     parser.add_argument("--self-play",  action="store_true",
                         help="RL vs RL self-play instead of vs rule-based bot")
     parser.add_argument("--resume",     action="store_true",
