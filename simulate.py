@@ -12,12 +12,10 @@ During play:
     check | call | fold | raise <amount> | all-in
 """
 
-import sys
 import argparse
 
 import eval7
 
-sys.path.insert(0, "/Users/sridhar/Downloads")
 from bot        import decide, configure_tournament, update_tournament_state
 from hand_logger import HandLogger
 
@@ -408,9 +406,7 @@ def main():
         print(f"\n  Tournament mode: {args.players} players, top {args.paid} paid")
 
     # ── Logger setup ─────────────────────────────────────────────────────────
-    logger = None if args.no_log else HandLogger(
-        log_dir="/Users/sridhar/Documents/Claude/Projects/Poker Bot/logs"
-    )
+    logger = None if args.no_log else HandLogger()
     if logger:
         print(f"  Logging to: {logger.session_file}")
 
